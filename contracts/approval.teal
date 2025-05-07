@@ -1,0 +1,53 @@
+#pragma version 5
+txn ApplicationID
+int 0
+==
+bnz main_l4
+txn OnCompletion
+int NoOp
+==
+bnz main_l3
+err
+main_l3:
+global GroupSize
+int 3
+==
+assert
+gtxn 0 TypeEnum
+int axfer
+==
+assert
+gtxn 1 TypeEnum
+int axfer
+==
+assert
+gtxn 1 AssetAmount
+int 100
+*
+gtxn 0 AssetAmount
+gtxn 1 AssetAmount
++
+int 9
+*
+==
+assert
+gtxn 1 AssetReceiver
+byte "Treasury"
+app_global_get
+==
+assert
+int 1
+return
+main_l4:
+txn NumAppArgs
+int 2
+==
+assert
+byte "Admin"
+txna ApplicationArgs 0
+app_global_put
+byte "Treasury"
+txna ApplicationArgs 1
+app_global_put
+int 1
+return

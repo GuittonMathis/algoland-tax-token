@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# pytest cache
+.pytest_cache/
+
+# Environnement virtuel
+.venv/
+
+# Fichier de configuration local
+.env
