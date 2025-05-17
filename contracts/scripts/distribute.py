@@ -1,80 +1,106 @@
+#!/usr/bin/env python3
+"""
+distribute.py
+
+Evenly splits the entire Treasury’s Dumbly balance into three parts:
+  - Burn address
+  - Rewards address
+  - LP address
+
+This script groups the three AssetTransfer transactions atomically,
+so they either all succeed or all fail together.
+
+Dependencies:
+  pip install py-algorand-sdk
+
+Usage:
+  python distribute.py
+"""
+
+from dotenv import load_dotenv
+import os
+import sys
+
 from algosdk import mnemonic, account
 from algosdk.v2client import algod
-from algosdk.transaction import (
-    AssetTransferTxn,
-    calculate_group_id,
-    wait_for_confirmation,
-)
+from algosdk.transaction import AssetTransferTxn, calculate_group_id, wait_for_confirmation
 
-# ─── CONFIGURATION ──────────────────────────────────────────────────────────────
-ALGOD_ADDRESS = "https://testnet-api.4160.nodely.dev"
-ALGOD_TOKEN   = ""
+# Load environment variables from .env
+load_dotenv()
 
-# Mnemonic du compte Treasury TestNet (celui qui détient réellement les fonds)
-TREASURY_MNEMONIC = (
-    "rent arctic mean fluid goose moon surface valid index refuse arrive fury useless "
-    "filter track write marine original broken middle recipe sister absurd above beauty"
-)
+# Algod network settings
+ALGOD_ADDRESS = os.getenv("ALGOD_ADDRESS", "https://testnet-api.4160.nodely.dev")
+ALGOD_TOKEN   = os.getenv("ALGOD_TOKEN", "")
 
-# Identifiant de l’ASA “Dumbly”
-ASSET_ID = 738130308
+# Treasury account mnemonic (holds the funds to distribute)
+TREASURY_MNEMONIC = os.getenv("TREASURY_MNEMONIC")
+if not TREASURY_MNEMONIC:
+    print("ERROR: TREASURY_MNEMONIC not set in .env")
+    sys.exit(1)
 
-# Adresses de destination (TestNet)
-BURN_ADDR    = "G7HVTZD2MIVTN5QTN7VL5GHDMZP2B4ZSVHJJ5G6FLZAOGKITEXIOKXFJ7I"
-REWARDS_ADDR = "AWM4UNTYTHULCN4MG4LE7NXFPX2HYPNQTCYMFLT64ZCXB3TUCI4O5Q4O5I"
-LP_ADDR      = "GTD2JLI6UBVE3A6EXIOVJYNKFBEQ64SCH3HXAMZWAACBAZZJKPG6S33W5A"
+# ASA ID of the "Dumbly" token
+ASSET_ID = int(os.getenv("ASSET_ID", 0))
+if ASSET_ID == 0:
+    print("ERROR: ASSET_ID not set or invalid in .env")
+    sys.exit(1)
 
-# ─── INITIALISATION CLÉS & CLIENT ALGOD ─────────────────────────────────────────
+# Destination addresses
+BURN_ADDR    = os.getenv("BURN_ADDR")
+REWARDS_ADDR = os.getenv("REWARDS_ADDR")
+LP_ADDR      = os.getenv("LP_ADDR")
+if not all([BURN_ADDR, REWARDS_ADDR, LP_ADDR]):
+    print("ERROR: BURN_ADDR, REWARDS_ADDR, and LP_ADDR must be set in .env")
+    sys.exit(1)
+
+# Initialize Algod client and Treasury account keys
 treasury_sk   = mnemonic.to_private_key(TREASURY_MNEMONIC)
 treasury_addr = account.address_from_private_key(treasury_sk)
+client        = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
+sp            = client.suggested_params()
 
-client = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
-sp     = client.suggested_params()
+def main():
+    # Fetch current Treasury balance for the ASA
+    acct   = client.account_info(treasury_addr)
+    assets = acct.get("assets", [])
+    total  = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
 
-# ─── LECTURE DYNAMIQUE DU SOLDE DE LA TREASURY ─────────────────────────────────
-acct    = client.account_info(treasury_addr)
-assets  = acct.get("assets", [])
-TOTAL   = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
+    print(f"ℹ️ Current Treasury balance: {total} Dumbly")
+    if total <= 0:
+        print("ℹ️ Nothing to distribute. Exiting.")
+        return
 
-print(f"ℹ️ Treasury solde actuel = {TOTAL} Dumbly")
-if TOTAL <= 0:
-    print("ℹ️ Aucun Dumbly à distribuer. Fin du script.")
-    exit(0)
+    # Calculate equal shares
+    burn_amt    = total // 3
+    rewards_amt = total // 3
+    lp_amt      = total - burn_amt - rewards_amt
+    print(f"ℹ️ Splitting into burn={burn_amt}, rewards={rewards_amt}, lp={lp_amt}")
 
-# ─── CALCUL DES PARTS ÉGALES ────────────────────────────────────────────────────
-burn_amt    = TOTAL // 3
-rewards_amt = TOTAL // 3
-lp_amt      = TOTAL - burn_amt - rewards_amt
+    # Build the three transfer transactions
+    tx1 = AssetTransferTxn(sender=treasury_addr, sp=sp, receiver=BURN_ADDR,    amt=burn_amt,    index=ASSET_ID)
+    tx2 = AssetTransferTxn(sender=treasury_addr, sp=sp, receiver=REWARDS_ADDR, amt=rewards_amt, index=ASSET_ID)
+    tx3 = AssetTransferTxn(sender=treasury_addr, sp=sp, receiver=LP_ADDR,      amt=lp_amt,      index=ASSET_ID)
 
-print(f"ℹ️ Distribution calculée : burn={burn_amt}, rewards={rewards_amt}, lp={lp_amt}")
+    # Group them atomically
+    txs = [tx1, tx2, tx3]
+    gid = calculate_group_id(txs)
+    for tx in txs:
+        tx.group = gid
 
-# ─── CONSTRUCTION DU GROUPE DE TRANSACTIONS ─────────────────────────────────────
-tx1 = AssetTransferTxn(
-    sender=treasury_addr, sp=sp,
-    receiver=BURN_ADDR,    amt=burn_amt,    index=ASSET_ID
-)
-tx2 = AssetTransferTxn(
-    sender=treasury_addr, sp=sp,
-    receiver=REWARDS_ADDR, amt=rewards_amt, index=ASSET_ID
-)
-tx3 = AssetTransferTxn(
-    sender=treasury_addr, sp=sp,
-    receiver=LP_ADDR,      amt=lp_amt,      index=ASSET_ID
-)
+    # Sign and send
+    signed_txs = [tx.sign(treasury_sk) for tx in txs]
+    try:
+        txid = client.send_transactions(signed_txs)
+        print(f"⏳ Group transaction sent, txID: {txid}")
+        wait_for_confirmation(client, txid, 4)
+    except Exception as e:
+        print(f"ERROR: Failed to send or confirm group transaction: {e}")
+        sys.exit(1)
 
-txs = [tx1, tx2, tx3]
-gid = calculate_group_id(txs)
-for tx in txs:
-    tx.group = gid
+    # Success message
+    print("✅ Distribution complete:")
+    print(f"   • {burn_amt} Dumbly → Burn")
+    print(f"   • {rewards_amt} Dumbly → Rewards")
+    print(f"   • {lp_amt} Dumbly → LP")
 
-signed_txs = [tx.sign(treasury_sk) for tx in txs]
-
-# ─── ENVOI & CONFIRMATION ───────────────────────────────────────────────────────
-txid = client.send_transactions(signed_txs)
-print("⏳ Groupe tx envoyé, txID :", txid)
-wait_for_confirmation(client, txid, 4)
-
-print("✅ Redistribution terminée avec succès.")
-print(f"   • {burn_amt} Dumbly → Burn")
-print(f"   • {rewards_amt} Dumbly → Rewards")
-print(f"   • {lp_amt} Dumbly → LP")
+if __name__ == "__main__":
+    main()

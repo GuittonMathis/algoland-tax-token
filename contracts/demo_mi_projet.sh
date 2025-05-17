@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-set -e
 
 ########################################
 # 1) Création de l'ASA
@@ -71,4 +69,4 @@ echo
 echo "Solde final de la treasury :"
 curl http://127.0.0.1:8000/treasury-balance && echo
 
-echo "🎉 Démo du backend mi-projet terminée !"
+echo " Démo du backend mi-projet terminée !"

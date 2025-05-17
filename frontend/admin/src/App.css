@@ -1,0 +1,75 @@
+/* src/App.css */
+
+/* Container “card” glassy */
+.card {
+  background: rgba(255,255,255,0.03);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  padding: 2rem;
+  width: 100%;
+  max-width: 480px;
+}
+
+/* Titres */
+h1 {
+  color: #FFFFFF;
+  font-size: 2rem;
+  margin-bottom: 1rem;
+  text-align: center;
+}
+h2 {
+  color: #F0F0F0;
+  font-size: 1.25rem;
+  margin-top: 1.5rem;
+}
+
+/* Ligne de séparation */
+hr {
+  border: 0;
+  border-top: 1px solid rgba(255,255,255,0.2);
+  margin: 1.5rem 0;
+}
+
+/* Labels & champs */
+label {
+  color: #F0F0F0;
+  display: block;
+  margin-bottom: 0.25rem;
+}
+input {
+  background: rgba(255,255,255,0.15);
+  border: none;
+  border-radius: 4px;
+  padding: 0.5rem;
+  color: #FFF;
+  width: 100px;
+  margin-bottom: 0.75rem;
+  outline: none;
+}
+
+/* Boutons */
+.btn {
+  background: linear-gradient(135deg, #C94B4B 0%, #E96443 100%);
+  color: #FFF;
+  font-weight: 600;
+  padding: 0.75rem;
+  border: none;
+  border-radius: 6px;
+  width: 100%;
+  margin-top: 1rem;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Messages statut */
+.status {
+  text-align: center;
+  margin-bottom: 1rem;
+}
+.status.success { color: #56C596; }
+.status.error   { color: #E06C75; }

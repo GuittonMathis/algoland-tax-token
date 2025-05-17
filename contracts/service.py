@@ -1,153 +1,170 @@
-# service.py
+#!/usr/bin/env python3
+"""
+service.py
 
-from dotenv import load_dotenv
-load_dotenv()  # charge automatiquement ton .env
+FastAPI backend for the Dumbly token treasury.  
+Provides endpoints to:
+  • GET  /treasury-balance       ⇒ returns current ASA balance in treasury  
+  • POST /distribute-manual      ⇒ distribute custom amounts to Burn, LP, Rewards  
+  • POST /distribute-all         ⇒ split entire balance evenly (1/3 each)
+
+Environment variables (.env):
+  ALGOD_ADDRESS     Algod API endpoint (e.g. https://testnet-api.algonode.cloud)
+  ALGOD_TOKEN       Algod API token (may be empty)
+  TREASURY_MNEMONIC 25-word mnemonic of the Treasury account
+  ASSET_ID          Numeric ASA ID for Dumbly
+  BURN_ADDR         Burn account address
+  LP_ADDR           LP account address
+  REWARDS_ADDR      Rewards account address
+
+Install dependencies:
+  pip install python-dotenv fastapi uvicorn algosdk pydantic
+Run:
+  uvicorn service:app --reload
+"""
 
 import os
+import sys
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, conint
 from algosdk import mnemonic, account
 from algosdk.v2client import algod
 from algosdk.transaction import AssetTransferTxn, calculate_group_id, wait_for_confirmation
+from algosdk.error import AlgodHTTPError
 
+# ─── Load environment ──────────────────────────────────────────────────────────
+load_dotenv()
+
+def get_env_var(name: str) -> str:
+    """Return an env var or exit if missing."""
+    val = os.getenv(name)
+    if not val:
+        print(f"ERROR: Missing environment variable: {name}")
+        sys.exit(1)
+    return val
+
+# Read and validate config
+ALGOD_ADDRESS     = get_env_var("ALGOD_ADDRESS")
+ALGOD_TOKEN       = os.getenv("ALGOD_TOKEN", "")
+TREASURY_MNEMONIC = get_env_var("TREASURY_MNEMONIC")
+ASSET_ID          = int(get_env_var("ASSET_ID"))
+BURN_ADDR         = get_env_var("BURN_ADDR")
+LP_ADDR           = get_env_var("LP_ADDR")
+REWARDS_ADDR      = get_env_var("REWARDS_ADDR")
+
+# ─── FastAPI setup ─────────────────────────────────────────────────────────────
 app = FastAPI()
 
-# ─── CONFIG via variables d’environnement ───────────────────────────────────────
-ALGOD_ADDRESS     = os.getenv("ALGOD_ADDRESS")
-ALGOD_TOKEN       = os.getenv("ALGOD_TOKEN", "")
-TREASURY_MNEMONIC = os.getenv("TREASURY_MNEMONIC")
-ASSET_ID          = int(os.getenv("ASSET_ID"))
-BURN_ADDR         = os.getenv("BURN_ADDR")
-LP_ADDR           = os.getenv("LP_ADDR")
-REWARDS_ADDR      = os.getenv("REWARDS_ADDR")
+# Allow only local React dev server
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Vérifie que tout est bien défini
-if not all([ALGOD_ADDRESS, TREASURY_MNEMONIC, ASSET_ID, BURN_ADDR, LP_ADDR, REWARDS_ADDR]):
-    raise RuntimeError("Merci de définir toutes les variables d’environnement dans .env")
+# ─── Initialize Algod client & Treasury keys ───────────────────────────────────
+try:
+    client        = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
+    treasury_sk   = mnemonic.to_private_key(TREASURY_MNEMONIC)
+    treasury_addr = account.address_from_private_key(treasury_sk)
+except Exception as e:
+    print(f"ERROR: Failed to initialize Algod client or keys: {e}")
+    sys.exit(1)
 
-# ─── INITIALISATION ALGOD & CLÉS ───────────────────────────────────────────────
-client        = algod.AlgodClient(ALGOD_TOKEN, ALGOD_ADDRESS)
-treasury_sk   = mnemonic.to_private_key(TREASURY_MNEMONIC)
-treasury_addr = account.address_from_private_key(treasury_sk)
-sp            = client.suggested_params()
-
-# ─── Schéma de la requête ──────────────────────────────────────────────────────
+# ─── Request model for manual distribution ──────────────────────────────────────
 class Distribution(BaseModel):
     burn:    conint(ge=0)
     lp:      conint(ge=0)
     rewards: conint(ge=0)
 
-# ─── Endpoint pour récupérer le solde de la treasury ───────────────────────────
+# ─── Endpoint: Get treasury balance ────────────────────────────────────────────
 @app.get("/treasury-balance")
 def get_treasury_balance():
-    acct   = client.account_info(treasury_addr)
-    assets = acct.get("assets", [])
-    bal    = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
+    """Return the current Dumbly ASA balance in the treasury account."""
+    acct_info = client.account_info(treasury_addr)
+    assets    = acct_info.get("assets", [])
+    bal       = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
     return {"treasury_balance": bal}
 
-# ─── Endpoint de distribution manuelle ─────────────────────────────────────────
+# ─── Endpoint: Manual distribution ─────────────────────────────────────────────
 @app.post("/distribute-manual")
 def distribute_manual(dist: Distribution):
-    # 1) Lit le solde actuel de la treasury
-    acct   = client.account_info(treasury_addr)
-    assets = acct.get("assets", [])
-    total  = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
+    """
+    Distribute specified amounts of Dumbly from treasury to Burn, LP, Rewards.
+    Validates that total requested ≤ current balance.
+    """
+    # Fetch current balance
+    acct_info = client.account_info(treasury_addr)
+    assets    = acct_info.get("assets", [])
+    total     = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
 
-    # 2) Validation
     requested = dist.burn + dist.lp + dist.rewards
     if requested > total:
-        raise HTTPException(400, detail=f"Montant demandé ({requested}) > solde treasury ({total})")
+        raise HTTPException(400, detail=f"Requested ({requested}) > balance ({total})")
 
-    # 3) Création des transactions avec paramètres nommés
-    tx1 = AssetTransferTxn(
-        sender=treasury_addr,
-        sp=sp,
-        receiver=BURN_ADDR,
-        amt=dist.burn,
-        index=ASSET_ID,
-    )
-    tx2 = AssetTransferTxn(
-        sender=treasury_addr,
-        sp=sp,
-        receiver=LP_ADDR,
-        amt=dist.lp,
-        index=ASSET_ID,
-    )
-    tx3 = AssetTransferTxn(
-        sender=treasury_addr,
-        sp=sp,
-        receiver=REWARDS_ADDR,
-        amt=dist.rewards,
-        index=ASSET_ID,
-    )
-
-    txs = [tx1, tx2, tx3]
+    # Build and group transactions
+    sp = client.suggested_params()
+    txs = [
+        AssetTransferTxn(treasury_addr, sp, BURN_ADDR,    dist.burn,    ASSET_ID),
+        AssetTransferTxn(treasury_addr, sp, LP_ADDR,      dist.lp,      ASSET_ID),
+        AssetTransferTxn(treasury_addr, sp, REWARDS_ADDR, dist.rewards, ASSET_ID),
+    ]
     gid = calculate_group_id(txs)
     for tx in txs:
         tx.group = gid
 
-    # 4) Signature & envoi
+    # Sign & send
     try:
         signed = [tx.sign(treasury_sk) for tx in txs]
         txid   = client.send_transactions(signed)
         wait_for_confirmation(client, txid, 4)
-    except Exception as e:
-        raise HTTPException(500, detail=f"Erreur Algod : {str(e)}")
+    except AlgodHTTPError as e:
+        raise HTTPException(500, detail=f"Algod error: {e}")
 
     return {
         "status": "success",
         "txid": txid,
-        "distributed": {
-            "burn":    dist.burn,
-            "lp":      dist.lp,
-            "rewards": dist.rewards
-        }
+        "distributed": {"burn": dist.burn, "lp": dist.lp, "rewards": dist.rewards}
     }
 
-# ─── Endpoint de redistribution automatique ───────────────────────────────────
+# ─── Endpoint: Automatic distribution ──────────────────────────────────────────
 @app.post("/distribute-all")
 def distribute_all():
-    # 1) Lire le solde actuel de la treasury
-    acct   = client.account_info(treasury_addr)
-    assets = acct.get("assets", [])
-    total  = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
+    """
+    Split the entire treasury balance evenly into three parts:
+    Burn, LP, and Rewards (floor division for two parts, remainder to LP).
+    """
+    acct_info = client.account_info(treasury_addr)
+    assets    = acct_info.get("assets", [])
+    total     = next((a["amount"] for a in assets if a["asset-id"] == ASSET_ID), 0)
 
-    # 2) Calcul des parts égales
     burn_amt    = total // 3
     rewards_amt = total // 3
     lp_amt      = total - burn_amt - rewards_amt
 
-    # 3) Construire les 3 transactions groupées
-    tx1 = AssetTransferTxn(
-        sender=treasury_addr, sp=sp, receiver=BURN_ADDR,    amt=burn_amt,    index=ASSET_ID
-    )
-    tx2 = AssetTransferTxn(
-        sender=treasury_addr, sp=sp, receiver=LP_ADDR,      amt=lp_amt,      index=ASSET_ID
-    )
-    tx3 = AssetTransferTxn(
-        sender=treasury_addr, sp=sp, receiver=REWARDS_ADDR, amt=rewards_amt, index=ASSET_ID
-    )
-
-    txs = [tx1, tx2, tx3]
+    sp = client.suggested_params()
+    txs = [
+        AssetTransferTxn(treasury_addr, sp, BURN_ADDR,    burn_amt,    ASSET_ID),
+        AssetTransferTxn(treasury_addr, sp, LP_ADDR,      lp_amt,      ASSET_ID),
+        AssetTransferTxn(treasury_addr, sp, REWARDS_ADDR, rewards_amt, ASSET_ID),
+    ]
     gid = calculate_group_id(txs)
     for tx in txs:
         tx.group = gid
 
-    # 4) Signer et envoyer
     try:
         signed = [tx.sign(treasury_sk) for tx in txs]
         txid   = client.send_transactions(signed)
         wait_for_confirmation(client, txid, 4)
-    except Exception as e:
-        raise HTTPException(500, detail=f"Erreur Algod : {str(e)}")
+    except AlgodHTTPError as e:
+        raise HTTPException(500, detail=f"Algod error: {e}")
 
-    # 5) Retourner le résultat à l’admin
     return {
         "status": "success",
         "txid": txid,
-        "distributed": {
-            "burn":    burn_amt,
-            "lp":      lp_amt,
-            "rewards": rewards_amt
-        }
+        "distributed": {"burn": burn_amt, "lp": lp_amt, "rewards": rewards_amt}
     }

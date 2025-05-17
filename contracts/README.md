@@ -1,105 +1,102 @@
-# README.md
+## Backend (contracts/)
 
-## 1. Prérequis
+A FastAPI service and a set of Python scripts to manage the Dumbly ASA treasury on Algorand.
 
-- Python 3.8+ et `pip`
-- Un compte TestNet Algorand avec des fonds (pour payer les frais de transactions)
+### Prerequisites
 
-## 2. Installation
+* Python 3.8+ (tested on 3.10)
+* `pip install python-dotenv algosdk fastapi pydantic uvicorn`
 
-1. Clone du dépôt et positionnement :
-   ```bash
-   git clone <url-de-ton-repo>
-   cd algoland-tax-token/contracts
-   ```
-2. Création d’un environnement virtuel et installation des dépendances :
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # ou .\.venv\Scripts\activate sur Windows
-   pip install --upgrade pip
-   pip install -r requirements.txt  # ou pip install fastapi uvicorn algosdk python-dotenv httpx pytest
-   ```
 
-## 3. Configuration (`.env`)
+### Environment
 
-Crée un fichier `.env` à la racine de `contracts/` et renseigne :
+In `contracts/.env`, define:
 
-```dotenv
-ALGOD_ADDRESS=https://testnet-api.4160.nodely.dev
+```ini
+ALGOD_ADDRESS=https://testnet-api.4160.nodely.dev  # or your Algod endpoint
 ALGOD_TOKEN=
-
-ADMIN_MNEMONIC="..."
-TREASURY_MNEMONIC="..."
-ASSET_ID=         # mis à jour après création de l’ASA
-APP_ID=           # mis à jour après déploiement du smart-contract
-
-BURN_ADDR=...
-LP_ADDR=...
-REWARDS_ADDR=...
-
-# Si nécessaire (mnemonics pour opt-in)
-BURN_MNEMONIC="..."
-LP_MNEMONIC="..."
-REWARDS_MNEMONIC="..."
+ADMIN_MNEMONIC="<25-word admin mnemonic>"
+TREASURY_MNEMONIC="<25-word treasury mnemonic>"
+ASSET_ID=<your ASA id>
+BURN_ADDR=<burn account address>
+LP_ADDR=<LP account address>
+REWARDS_ADDR=<rewards account address>
+BURN_MNEMONIC="<burn mnemonic>"
+LP_MNEMONIC="<lp mnemonic>"
+REWARDS_MNEMONIC="<rewards mnemonic>"
+APP_ID=<your app id>  # optional, used by tests
+BUYER_MNEMONIC="<buyer mnemonic>"  # for test_tax.py
 ```
 
-## 4. Création de l’ASA “Dumbly”
+### Quickstart / Demo Flow
+
+Run exactly these steps (as in `demo_mi_projet.sh`):
 
 ```bash
-python create_asa.py
-# → note l’ASSET_ID généré et mets-le dans .env
-```
+# 1) Create the ASA
+cd contracts
+python scripts/create_asa.py
+# → note new ASSET_ID, update .env
 
-## 5. Déploiement du smart-contract (taxe 9 % on-chain)
+# 2) Opt-in the targets
+python scripts/optin_targets.py
 
-```bash
-# (Re)compiler le TEAL avec la logique taxe
+# 3) Compile & deploy the stateful contract
 python tax_token.py
+python scripts/deploy.py
+# → note new APP_ID, update .env
 
-# Déployer le contrat
-python deploy.py
-# → note l’APP_ID généré et mets-le dans .env
+# 4) Test the 9% tax on-chain
+python tests/test_tax.py
+
+# 5) Check the treasury balance
+curl http://127.0.0.1:8000/treasury-balance && echo
+
+# 6) Manual distribution (example: 10/20/30)
+curl -X POST http://127.0.0.1:8000/distribute-manual \
+  -H "Content-Type: application/json" \
+  -d '{"burn":10,"lp":20,"rewards":30}' && echo
+
+# 7) Automatic distribution (1/3 each)
+curl -X POST http://127.0.0.1:8000/distribute-all && echo
 ```
 
-## 6. Lancer l’API FastAPI
+### Scripts
+
+All scripts live under `contracts/` or `contracts/scripts/`:
+
+* **scripts/create\_asa.py**: Create the Dumbly ASA and print `asset-id`.
+* **scripts/optin\_targets.py**: Opt-in Burn, LP, and Rewards accounts.
+* **tax\_token.py**: Generate `approval.teal` & `clear.teal` from PyTeal.
+* **scripts/deploy.py**: Compile and deploy the application.
+* **scripts/distribute.py**: Standalone equal-split distribution (useful outside FastAPI).
+* **scripts/check\_balance.py**: Print current treasury balance.
+* **contracts/check\_targets\_balance.py**: Print balances of Burn, LP, Rewards.
+
+### API Server
+
+* **service.py**: FastAPI app exposing:
+
+  * `GET /treasury-balance`  → returns `{ "treasury_balance": <number> }`
+  * `POST /distribute-manual` → accepts `{ burn, lp, rewards }`
+  * `POST /distribute-all`    → splits entire balance 1/3 each
+
+Start server:
 
 ```bash
 uvicorn service:app --reload
 ```
 
-L’API tournera par défaut sur [http://127.0.0.1:8000](http://127.0.0.1:8000)
+### Tests
 
-## 7. Endpoints disponibles
+Pytest scripts under `contracts/tests/`:
 
-| Méthode | URL                  | Description                                                                                                |
-| ------- | -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| GET     | `/treasury-balance`  | Récupère le solde actuel de la treasury                                                                    |
-| POST    | `/distribute-manual` | Redistribue des montants manuels vers burn/LP/rewards. Corps JSON : `{ "burn": X, "lp": Y, "rewards": Z }` |
-| POST    | `/distribute-all`    | Redistribue automatiquement **tout** le solde en 3 parts égales                                            |
+* `test_tax.py`       → validates the 9% tax logic
+* `test_fraction.py`  → checks fractional transfers
+* `test_distribute_all.py` → end-to-end distribution via API
 
-### Exemples
 
-```bash
-# Voir solde\
-curl http://127.0.0.1:8000/treasury-balance
-
-# Redistribution manuelle (50,20,30)
-curl -X POST http://127.0.0.1:8000/distribute-manual \
-  -H "Content-Type: application/json" \
-  -d '{"burn":50,"lp":20,"rewards":30}'
-
-# Redistribution automatique
-curl -X POST http://127.0.0.1:8000/distribute-all
 ```
 
-## 8. Tests automatisés (pytest)
-
-```bash
-# Installer si nécessaire
-pip install pytest httpx
-
-# Lancer le test de distribute-all
-pytest test_distribute_all.py -q
-```
 
 
