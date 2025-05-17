@@ -1,5 +1,3 @@
-# Algoland Tax Token
-
 A PyTEAL smart contract paired with a React admin interface to manage a tax token on Algorand.
 
 ## Project Structure
